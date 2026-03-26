@@ -1,0 +1,25 @@
+﻿# Flutter/Dart
+**/.dart_tool/
+**/.packages
+**/build/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+
+# Android/Gradle
+.gradle/
+**/.gradle/
+**/local.properties
+**/captures/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Python
+.venv/
+
+# Local tooling artifacts
+tools/gradle-8.10.2/
+tools/gradle-8.10.2-bin.zip
