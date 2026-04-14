@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: syncro-stream-token-server
+    runtime: node
+    rootDir: syncro_flutter/stream_token_server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: STREAM_API_KEY
+        sync: false
+      - key: STREAM_API_SECRET
+        sync: false
