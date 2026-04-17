@@ -11,3 +11,7 @@ services:
         sync: false
       - key: STREAM_API_SECRET
         sync: false
+      - key: IGDB_CLIENT_ID
+        sync: false
+      - key: IGDB_CLIENT_SECRET
+        sync: false

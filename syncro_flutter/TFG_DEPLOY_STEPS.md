@@ -16,6 +16,8 @@ Sigue este orden exacto para tener la app online y Stream funcionando fuera de l
 4. En el servicio `syncro-stream-token-server`, configura variables:
    - `STREAM_API_KEY`
    - `STREAM_API_SECRET`
+   - `IGDB_CLIENT_ID`
+   - `IGDB_CLIENT_SECRET`
 5. Deploy.
 6. Copia la URL publica (ejemplo):
    - `https://syncro-stream-token-server.onrender.com`
@@ -52,6 +54,7 @@ flutter build web `
   --release `
   --dart-define=STREAM_API_KEY=j5tkkdvknj3p `
   --dart-define=STREAM_TOKEN_SERVER_URL=https://TU_URL_ONRENDER `
+   --dart-define=IGDB_PROXY_URL=https://TU_URL_ONRENDER `
   --dart-define=STREAM_FEED_GROUP=timeline `
   --dart-define=STREAM_FEED_ID=gaming
 ```

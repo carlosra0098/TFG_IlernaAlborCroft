@@ -11,9 +11,15 @@ class StreamHubScreen extends StatefulWidget {
   const StreamHubScreen({
     super.key,
     required this.displayName,
+    required this.currentUserId,
+    this.initialPeerId,
+    this.initialPeerName,
   });
 
   final String displayName;
+  final String currentUserId;
+  final String? initialPeerId;
+  final String? initialPeerName;
 
   @override
   State<StreamHubScreen> createState() => _StreamHubScreenState();
@@ -21,6 +27,10 @@ class StreamHubScreen extends StatefulWidget {
 
 class _StreamHubScreenState extends State<StreamHubScreen>
     with SingleTickerProviderStateMixin {
+  static const Duration _tokenRequestTimeout = Duration(seconds: 6);
+  static const Duration _chatRequestTimeout = Duration(seconds: 10);
+  static const Duration _feedRequestTimeout = Duration(seconds: 10);
+
   static const String _streamApiKey = String.fromEnvironment(
     'STREAM_API_KEY',
     defaultValue: 'j5tkkdvknj3p',
@@ -45,8 +55,12 @@ class _StreamHubScreenState extends State<StreamHubScreen>
   );
 
   late final TabController _tabController;
+  late final sc.StreamMessageInputController _messageInputController;
   sc.StreamChatClient? _chatClient;
+  sc.Channel? _globalChannel;
   sc.StreamChannelListController? _channelListController;
+  sc.StreamChannelListController? _directMessageController;
+  sc.Channel? _selectedChannel;
   sf.StreamFeedsClient? _feedsClient;
   StreamSubscription<sf.FeedState>? _feedSubscription;
 
@@ -60,6 +74,7 @@ class _StreamHubScreenState extends State<StreamHubScreen>
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
+    _messageInputController = sc.StreamMessageInputController();
     _initializeStream();
   }
 
@@ -67,10 +82,44 @@ class _StreamHubScreenState extends State<StreamHubScreen>
   void dispose() {
     _feedSubscription?.cancel();
     _tabController.dispose();
+    _messageInputController.dispose();
     _channelListController?.dispose();
+    _directMessageController?.dispose();
     _chatClient?.disconnectUser();
     _feedsClient?.disconnect();
     super.dispose();
+  }
+
+  Future<void> _retryInitializeStream() async {
+    _feedSubscription?.cancel();
+    _feedSubscription = null;
+
+    _channelListController?.dispose();
+    _channelListController = null;
+    _directMessageController?.dispose();
+    _directMessageController = null;
+    _globalChannel = null;
+    _selectedChannel = null;
+
+    await _chatClient?.disconnectUser();
+    _chatClient = null;
+
+    await _feedsClient?.disconnect();
+    _feedsClient = null;
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _isFeedLoading = true;
+      _chatError = null;
+      _feedError = null;
+      _activities = <sf.ActivityData>[];
+    });
+
+    await _initializeStream();
   }
 
   Future<void> _initializeStream() async {
@@ -86,10 +135,11 @@ class _StreamHubScreenState extends State<StreamHubScreen>
       return;
     }
 
-    const String userId = 'super-band-9';
+    final String userId = widget.currentUserId;
 
     sc.StreamChatClient? chatClient;
     sc.StreamChannelListController? controller;
+    sc.StreamChannelListController? directMessageController;
     sf.StreamFeedsClient? feedsClient;
     sf.Feed? feed;
     String? chatError;
@@ -104,6 +154,9 @@ class _StreamHubScreenState extends State<StreamHubScreen>
     );
     if (_looksLikeJwt(fetchedToken ?? '')) {
       effectiveChatToken = fetchedToken!.trim();
+    } else if (resolvedTokenServerUrl.isNotEmpty) {
+      // When token server URL is configured, avoid falling back to stale static tokens.
+      effectiveChatToken = '';
     } else {
       final String tokenFromDefine = _streamChatUserToken.trim();
       if (_looksLikeJwt(tokenFromDefine)) {
@@ -123,43 +176,98 @@ class _StreamHubScreenState extends State<StreamHubScreen>
         );
       }
 
-      await chatClient.connectUser(
-        sc.User(id: userId, name: widget.displayName),
-        effectiveChatToken,
-      );
+      await chatClient
+          .connectUser(
+            sc.User(id: userId, name: widget.displayName),
+            effectiveChatToken,
+          )
+          .timeout(_chatRequestTimeout);
 
       final sc.Channel globalChannel = chatClient.channel(
         'messaging',
         id: 'flutterdevs',
         extraData: <String, Object>{
-          'name': 'Flutter devs',
-          'members': <String>[userId],
+          'name': 'Chat global Syncro',
         },
       );
-      await globalChannel.watch();
-      await _sendBootstrapMessage(globalChannel);
+      await globalChannel.watch().timeout(_chatRequestTimeout);
+      _globalChannel = globalChannel;
+      // Always keep global chat selected as baseline so the screen doesn't crash
+      // if channel list or DM setup fails later due permissions.
+      _selectedChannel = globalChannel;
+      try {
+        await _sendBootstrapMessage(globalChannel);
+      } catch (_) {
+        // Ignore bootstrap message errors; channel can still be used normally.
+      }
 
-      final sc.Filter filter = sc.Filter.and(<sc.Filter>[
-        sc.Filter.equal('type', 'messaging'),
-        sc.Filter.in_('members', <Object>[userId]),
-      ]);
+      try {
+        final sc.Filter filter = sc.Filter.and(<sc.Filter>[
+          sc.Filter.equal('type', 'messaging'),
+          sc.Filter.in_('members', <Object>[userId]),
+        ]);
 
-      final sc.SortOrder<sc.ChannelState> sort =
-          <sc.SortOption<sc.ChannelState>>[
-            const sc.SortOption<sc.ChannelState>.desc('last_message_at'),
-          ];
+        final sc.SortOrder<sc.ChannelState> sort =
+            <sc.SortOption<sc.ChannelState>>[
+              const sc.SortOption<sc.ChannelState>.desc('last_message_at'),
+            ];
 
-      await chatClient.queryChannelsOnline(
-        filter: filter,
-        sort: sort,
-      );
+        await chatClient
+            .queryChannelsOnline(
+              filter: filter,
+              sort: sort,
+            )
+            .timeout(_chatRequestTimeout);
 
-      controller = sc.StreamChannelListController(
-        client: chatClient,
-        filter: filter,
-        channelStateSort: sort,
-      );
-      await controller.doInitialLoad();
+        controller = sc.StreamChannelListController(
+          client: chatClient,
+          filter: filter,
+          channelStateSort: sort,
+        );
+        await controller.doInitialLoad().timeout(_chatRequestTimeout);
+
+        final sc.Filter directMessageFilter = sc.Filter.and(<sc.Filter>[
+          sc.Filter.equal('type', 'messaging'),
+          sc.Filter.in_('members', <Object>[userId]),
+          sc.Filter.equal('is_direct_message', true),
+        ]);
+        directMessageController = sc.StreamChannelListController(
+          client: chatClient,
+          filter: directMessageFilter,
+          channelStateSort: sort,
+        );
+        await directMessageController
+            .doInitialLoad()
+            .timeout(_chatRequestTimeout);
+      } catch (_) {
+        // Keep chat usable even when channel-list queries are rejected.
+        controller = null;
+        directMessageController = null;
+      }
+
+      final String peerId = (widget.initialPeerId ?? '').trim();
+      if (peerId.isNotEmpty && peerId != userId) {
+        final List<String> members = <String>[userId, peerId]..sort();
+        final String channelId = 'dm_${members.join('_')}';
+        try {
+          final sc.Channel dmChannel = chatClient.channel(
+            'messaging',
+            id: channelId,
+            extraData: <String, Object>{
+              'name': widget.initialPeerName?.trim().isNotEmpty == true
+                  ? 'Chat con ${widget.initialPeerName}'
+                  : 'Chat directo',
+              'members': members,
+              'is_direct_message': true,
+            },
+          );
+          await dmChannel.watch().timeout(_chatRequestTimeout);
+          _selectedChannel = dmChannel;
+        } catch (_) {
+          // Fallback to global if peer user is not provisioned in Stream.
+          _selectedChannel = globalChannel;
+        }
+      }
     } catch (error) {
       chatError =
           'No se pudo abrir el chat de Stream con connectUser. Verifica STREAM_TOKEN_SERVER_URL (actual: ${resolvedTokenServerUrl.isEmpty ? 'no configurada' : resolvedTokenServerUrl}) o pasa STREAM_CHAT_USER_TOKEN por dart-define. Error: $error';
@@ -183,7 +291,7 @@ class _StreamHubScreenState extends State<StreamHubScreen>
         user: feedUser,
         tokenProvider: sf.TokenProvider.static(sf.UserToken(effectiveFeedToken)),
       );
-      await feedsClient.connect();
+      await feedsClient.connect().timeout(_feedRequestTimeout);
 
       feed = feedsClient.feedFromQuery(
         sf.FeedQuery(
@@ -193,7 +301,8 @@ class _StreamHubScreenState extends State<StreamHubScreen>
         ),
       );
 
-      final sf.Result<sf.FeedData> feedResult = await feed.getOrCreate();
+        final sf.Result<sf.FeedData> feedResult =
+          await feed.getOrCreate().timeout(_feedRequestTimeout);
       if (feedResult.isFailure) {
         feedError = 'Feed no disponible: ${feedResult.exceptionOrNull()}';
       }
@@ -209,6 +318,7 @@ class _StreamHubScreenState extends State<StreamHubScreen>
     setState(() {
       _chatClient = chatClient;
       _channelListController = controller;
+      _directMessageController = directMessageController;
       _feedsClient = feedsClient;
       _activities = feed?.state.activities ?? <sf.ActivityData>[];
       _chatError = chatError;
@@ -235,9 +345,18 @@ class _StreamHubScreenState extends State<StreamHubScreen>
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    if (_chatClient == null || _channelListController == null) {
+    if (_chatClient == null || (_channelListController == null && _selectedChannel == null)) {
       return Scaffold(
-        appBar: AppBar(title: const Text('Stream Chat + Feed')),
+        appBar: AppBar(
+          title: const Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(Icons.chat_bubble_outline),
+              SizedBox(width: 8),
+              Text('Chat global'),
+            ],
+          ),
+        ),
         body: _buildSetupHelp(
           _chatError ?? 'No se pudo inicializar Stream Chat.',
         ),
@@ -250,52 +369,61 @@ class _StreamHubScreenState extends State<StreamHubScreen>
         data: sc.StreamChatThemeData.fromTheme(Theme.of(context)),
         child: Scaffold(
         appBar: AppBar(
-          title: const Text('Stream Chat + Feed'),
+          title: const Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(Icons.chat_bubble_outline),
+              SizedBox(width: 8),
+              Text('Chat global'),
+            ],
+          ),
           bottom: TabBar(
             controller: _tabController,
             tabs: const <Widget>[
-              Tab(text: 'Chat en vivo'),
-              Tab(text: 'Gaming feed'),
+              Tab(text: 'Chat global'),
+              Tab(text: 'Chat privado'),
             ],
           ),
         ),
         body: TabBarView(
           controller: _tabController,
           children: <Widget>[
-            sc.StreamChannelListView(
-              controller: _channelListController!,
-              onChannelTap: (sc.Channel channel) {
-                Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (BuildContext context) {
-                      return sc.StreamChatTheme(
-                        data:
-                            sc.StreamChatThemeData.fromTheme(Theme.of(context)),
-                        child: sc.StreamChannel(
-                          channel: channel,
-                          child: Scaffold(
-                            appBar: AppBar(
-                              title: Text(channel.name ?? 'Canal'),
-                            ),
-                            body: const Column(
-                              children: <Widget>[
-                                Expanded(child: sc.StreamMessageListView()),
-                                sc.StreamMessageInput(),
-                              ],
-                            ),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                );
-              },
-            ),
-            _buildFeedTab(),
+            _buildChatTab(),
+            _buildPrivateChatTab(),
           ],
         ),
       ),
       ),
+    );
+  }
+
+  Widget _buildPrivateChatTab() {
+    final sc.StreamChannelListController? directController =
+        _directMessageController;
+
+    if (directController == null) {
+      return const Center(
+        child: Text('No hay chats privados disponibles ahora mismo.'),
+      );
+    }
+
+    return sc.StreamChannelListView(
+      controller: directController,
+      emptyBuilder: (_) => const Center(
+        child: Padding(
+          padding: EdgeInsets.all(16),
+          child: Text(
+            'Todavia no tienes chats privados. Añade amigos y abre un chat desde su perfil.',
+            textAlign: TextAlign.center,
+          ),
+        ),
+      ),
+      onChannelTap: (sc.Channel tapped) {
+        setState(() {
+          _selectedChannel = tapped;
+        });
+        _tabController.animateTo(0);
+      },
     );
   }
 
@@ -346,11 +474,239 @@ class _StreamHubScreenState extends State<StreamHubScreen>
     );
   }
 
+  Widget _buildChatTab() {
+    final sc.Channel? channel = _selectedChannel;
+
+    if (channel == null) {
+      if (_channelListController == null) {
+        return const Center(
+          child: Text('No hay canales disponibles en este momento.'),
+        );
+      }
+      return sc.StreamChannelListView(
+        controller: _channelListController!,
+        onChannelTap: (sc.Channel tapped) {
+          setState(() {
+            _selectedChannel = tapped;
+          });
+        },
+      );
+    }
+
+    return sc.StreamChannel(
+      channel: channel,
+      child: Column(
+        children: <Widget>[
+          Material(
+            color: Theme.of(context).colorScheme.surfaceContainerHighest,
+            child: ListTile(
+              leading: IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: () {
+                  setState(() {
+                    _selectedChannel = _globalChannel;
+                  });
+                },
+              ),
+              title: Text(channel.name ?? 'Canal'),
+            ),
+          ),
+          Expanded(
+            child: sc.StreamMessageListView(
+              messageBuilder: (
+                BuildContext context,
+                sc.MessageDetails details,
+                List<sc.Message> messages,
+                sc.StreamMessageWidget defaultMessageWidget,
+              ) {
+                return defaultMessageWidget.copyWith(
+                  onMessageLongPress: (sc.Message message) {
+                    _showMessageQuickActions(context, message);
+                  },
+                  onReactionsTap: (sc.Message message) {
+                    _handleReactionsTap(context, message);
+                  },
+                );
+              },
+            ),
+          ),
+          sc.StreamMessageInput(
+            messageInputController: _messageInputController,
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showMessageQuickActions(
+    BuildContext context,
+    sc.Message message,
+  ) {
+    final sc.Channel channel = sc.StreamChannel.of(context).channel;
+    showModalBottomSheet<void>(
+      useRootNavigator: false,
+      context: context,
+      showDragHandle: true,
+      builder: (BuildContext sheetContext) {
+        final List<(String emoji, String reactionType)> reactions =
+            <(String emoji, String reactionType)>[
+          ('👍', 'like'),
+          ('❤️', 'love'),
+          ('😂', 'haha'),
+          ('😮', 'wow'),
+          ('😢', 'sad'),
+        ];
+
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  'Acciones del mensaje',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: reactions.map(((String, String) item) {
+                    return ActionChip(
+                      label: Text(item.$1),
+                      onPressed: () async {
+                        await channel.sendReaction(
+                          message,
+                          item.$2,
+                        );
+                        if (!mounted) {
+                          return;
+                        }
+                        Navigator.of(sheetContext).pop();
+                      },
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 12),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.reply),
+                  title: const Text('Responder a este mensaje'),
+                  onTap: () {
+                    _messageInputController.quotedMessage = message;
+                    Navigator.of(sheetContext).pop();
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _handleReactionsTap(
+    BuildContext context,
+    sc.Message message,
+  ) {
+    final List<sc.Reaction> latestReactions =
+        message.latestReactions ?? <sc.Reaction>[];
+    final List<sc.Reaction> ownReactions =
+        message.ownReactions ?? <sc.Reaction>[];
+    final Map<String, int> counts =
+        message.reactionCounts ?? <String, int>{};
+    final Set<String> reactionTypes = <String>{
+      ...counts.keys,
+      ...latestReactions.map((sc.Reaction reaction) => reaction.type),
+      ...ownReactions.map((sc.Reaction reaction) => reaction.type),
+    };
+
+    if (reactionTypes.isEmpty) {
+      return;
+    }
+
+    final sc.Channel channel = sc.StreamChannel.of(context).channel;
+
+    showModalBottomSheet<void>(
+      useRootNavigator: false,
+      context: context,
+      showDragHandle: true,
+      builder: (BuildContext sheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  'Reacciones',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: reactionTypes.map((String type) {
+                    sc.Reaction? ownReaction;
+                    for (final sc.Reaction reaction in ownReactions) {
+                      if (reaction.type == type) {
+                        ownReaction = reaction;
+                        break;
+                      }
+                    }
+
+                    final int count = counts[type] ?? 0;
+                    final bool hasOwnReaction = ownReaction != null;
+
+                    return FilterChip(
+                      selected: hasOwnReaction,
+                      label: Text('${_emojiForReaction(type)} $count'),
+                      onSelected: (_) async {
+                        if (ownReaction != null) {
+                          await channel.deleteReaction(message, ownReaction);
+                        } else {
+                          await channel.sendReaction(message, type);
+                        }
+                        if (!mounted) {
+                          return;
+                        }
+                        Navigator.of(sheetContext).pop();
+                      },
+                    );
+                  }).toList(),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  String _emojiForReaction(String type) {
+    return switch (type) {
+      'like' => '👍',
+      'love' => '❤️',
+      'haha' => '😂',
+      'wow' => '😮',
+      'sad' => '😢',
+      _ => '⭐',
+    };
+  }
+
   Widget _buildSetupHelp(String primaryError) {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: <Widget>[
         Text(primaryError),
+        const SizedBox(height: 12),
+        ElevatedButton.icon(
+          onPressed: _retryInitializeStream,
+          icon: const Icon(Icons.refresh),
+          label: const Text('Reintentar conexion de Stream'),
+        ),
         const SizedBox(height: 12),
         const Text('Ejemplo de ejecución:'),
         const SizedBox(height: 6),
@@ -429,7 +785,7 @@ class _StreamHubScreenState extends State<StreamHubScreen>
           'userId': userId,
           'name': name,
         }),
-      );
+      ).timeout(_tokenRequestTimeout);
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
         return null;

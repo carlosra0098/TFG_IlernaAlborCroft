@@ -46,7 +46,7 @@ class DefaultFirebaseOptions {
     messagingSenderId: '847934410234',
     projectId: 'syncro-1f9a6',
     authDomain: 'syncro-1f9a6.firebaseapp.com',
-    storageBucket: 'syncro-1f9a6.firebasestorage.app',
+    storageBucket: 'syncro-1f9a6.appspot.com',
     measurementId: 'G-ZNJ286SY94',
   );
 
@@ -55,7 +55,7 @@ class DefaultFirebaseOptions {
     appId: '1:847934410234:android:c1f84cd5df40ab903da843',
     messagingSenderId: '847934410234',
     projectId: 'syncro-1f9a6',
-    storageBucket: 'syncro-1f9a6.firebasestorage.app',
+    storageBucket: 'syncro-1f9a6.appspot.com',
   );
 
   static const FirebaseOptions ios = FirebaseOptions(
@@ -63,7 +63,7 @@ class DefaultFirebaseOptions {
     appId: '1:847934410234:ios:b73e76fc34bd21ea3da843',
     messagingSenderId: '847934410234',
     projectId: 'syncro-1f9a6',
-    storageBucket: 'syncro-1f9a6.firebasestorage.app',
+    storageBucket: 'syncro-1f9a6.appspot.com',
     iosBundleId: 'com.example.syncroFlutter',
   );
 
@@ -72,7 +72,7 @@ class DefaultFirebaseOptions {
     appId: '1:847934410234:ios:b73e76fc34bd21ea3da843',
     messagingSenderId: '847934410234',
     projectId: 'syncro-1f9a6',
-    storageBucket: 'syncro-1f9a6.firebasestorage.app',
+    storageBucket: 'syncro-1f9a6.appspot.com',
     iosBundleId: 'com.example.syncroFlutter',
   );
 
@@ -82,7 +82,7 @@ class DefaultFirebaseOptions {
     messagingSenderId: '847934410234',
     projectId: 'syncro-1f9a6',
     authDomain: 'syncro-1f9a6.firebaseapp.com',
-    storageBucket: 'syncro-1f9a6.firebasestorage.app',
+    storageBucket: 'syncro-1f9a6.appspot.com',
     measurementId: 'G-TKJDVH0E63',
   );
 }

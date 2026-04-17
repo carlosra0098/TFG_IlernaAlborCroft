@@ -9,6 +9,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:syncro_flutter/features/stream/stream_hub_screen.dart';
 import 'package:syncro_flutter/services/firebase_bootstrap.dart';
+import 'package:syncro_flutter/services/igdb_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -71,6 +72,7 @@ class UserModel {
     String? displayName,
     String? avatar,
     Uint8List? avatarBytes,
+    bool clearAvatarBytes = false,
     String? profileStatus,
     double? fontScale,
     AccessibilityMode? accessibilityMode,
@@ -87,7 +89,7 @@ class UserModel {
       password: password,
       displayName: displayName ?? this.displayName,
       avatar: avatar ?? this.avatar,
-      avatarBytes: avatarBytes ?? this.avatarBytes,
+      avatarBytes: clearAvatarBytes ? null : (avatarBytes ?? this.avatarBytes),
       profileStatus: profileStatus ?? this.profileStatus,
       fontScale: fontScale ?? this.fontScale,
       accessibilityMode: accessibilityMode ?? this.accessibilityMode,
@@ -156,6 +158,7 @@ class GameModel {
     required this.id,
     required this.name,
     required this.genre,
+    required this.imageUrl,
     required this.sensoryIntensity,
     required this.description,
   });
@@ -163,6 +166,7 @@ class GameModel {
   final int id;
   final String name;
   final String genre;
+  final String imageUrl;
   final SensoryIntensity sensoryIntensity;
   final String description;
 }
@@ -184,6 +188,26 @@ class PostModel {
   int likes;
   final List<String> comments;
   final Set<int> likedBy;
+}
+
+class CommunityGuideModel {
+  CommunityGuideModel({
+    required this.id,
+    required this.gameId,
+    required this.authorId,
+    required this.authorName,
+    required this.title,
+    required this.content,
+    required this.createdAt,
+  });
+
+  final int id;
+  final int gameId;
+  final int authorId;
+  final String authorName;
+  final String title;
+  final String content;
+  final DateTime createdAt;
 }
 
 class TaskModel {
@@ -381,7 +405,15 @@ class _SyncroRootState extends State<SyncroRoot> {
       <int, Map<String, int>>{};
   final Map<int, Set<String>> _redeemedCodesByUser = <int, Set<String>>{};
   final Map<int, String> _lastGeneratedCodeByUser = <int, String>{};
+  final Map<int, Set<int>> _friendsByUser = <int, Set<int>>{};
+  final List<CommunityGuideModel> _communityGuides = <CommunityGuideModel>[];
+  final List<IgdbGameDto> _igdbResults = <IgdbGameDto>[];
+  Timer? _igdbSearchDebounce;
+  bool _isIgdbLoading = false;
+  String? _igdbErrorMessage;
+  String _lastIgdbQuery = '';
   int _taskIdCounter = 1;
+  int _guideIdCounter = 1;
   int _secondsSinceBreakReminder = 0;
   Timer? _ticker;
 
@@ -436,14 +468,6 @@ class _SyncroRootState extends State<SyncroRoot> {
     ),
   ];
 
-  final List<Map<String, String>> _friends = const <Map<String, String>>[
-    {'name': 'Alex', 'status': 'En linea', 'avatar': '🕹️'},
-    {'name': 'Nora', 'status': 'Jugando Valorant', 'avatar': '🎯'},
-    {'name': 'Dani', 'status': 'Ausente', 'avatar': '🐉'},
-    {'name': 'Maya', 'status': 'En Stardew Valley', 'avatar': '🌱'},
-    {'name': 'Leo', 'status': 'En linea', 'avatar': '⚔️'},
-  ];
-
   final List<Map<String, String>> _news = const <Map<String, String>>[
     {
       'title': 'Nuevo parche competitivo mejora el matchmaking',
@@ -495,6 +519,7 @@ class _SyncroRootState extends State<SyncroRoot> {
   @override
   void dispose() {
     _ticker?.cancel();
+    _igdbSearchDebounce?.cancel();
     _redeemCodeController.dispose();
     super.dispose();
   }
@@ -509,6 +534,35 @@ class _SyncroRootState extends State<SyncroRoot> {
         avatar: '⚡',
       ),
     );
+    _users.addAll(<UserModel>[
+      UserModel(
+        id: 2,
+        email: 'alex@syncro.dev',
+        password: 'demo123',
+        displayName: 'Alex',
+        avatar: '🕹️',
+        profileStatus: 'En linea',
+      ),
+      UserModel(
+        id: 3,
+        email: 'nora@syncro.dev',
+        password: 'demo123',
+        displayName: 'Nora',
+        avatar: '🎯',
+        profileStatus: 'Jugando Valorant',
+      ),
+      UserModel(
+        id: 4,
+        email: 'maya@syncro.dev',
+        password: 'demo123',
+        displayName: 'Maya',
+        avatar: '🌱',
+        profileStatus: 'En Stardew Valley',
+      ),
+    ]);
+    _friendsByUser[1] = <int>{2, 3};
+    _friendsByUser[2] = <int>{1};
+    _friendsByUser[3] = <int>{1};
 
     final List<String> featured = <String>[
       'Minecraft',
@@ -532,18 +586,19 @@ class _SyncroRootState extends State<SyncroRoot> {
       'Shooter',
       'Simulacion',
     ];
-
     for (int id = 1; id <= 40; id++) {
       final SensoryIntensity intensity = switch (id % 3) {
         0 => SensoryIntensity.baja,
         1 => SensoryIntensity.media,
         _ => SensoryIntensity.alta,
       };
+      final String gameName = id <= featured.length ? featured[id - 1] : 'Juego $id';
       _games.add(
         GameModel(
           id: id,
-          name: id <= featured.length ? featured[id - 1] : 'Juego $id',
+          name: gameName,
           genre: genres[id % genres.length],
+          imageUrl: _imageForGameName(gameName),
           sensoryIntensity: intensity,
           description:
               'Experiencia ${_intensityName(intensity).toLowerCase()} con enfoque accesible.',
@@ -574,6 +629,32 @@ class _SyncroRootState extends State<SyncroRoot> {
         id: 3,
         title: 'Config recomendada para Modo TDAH',
         content: 'Interfaz minimalista, tareas micro y recordatorios breves.',
+      ),
+    ]);
+
+    final UserModel demoUser = _users.firstWhere(
+      (UserModel user) => user.email == 'demo',
+    );
+    _communityGuides.addAll(<CommunityGuideModel>[
+      CommunityGuideModel(
+        id: _guideIdCounter++,
+        gameId: 1,
+        authorId: demoUser.id,
+        authorName: demoUser.displayName,
+        title: 'Guía base para empezar sin saturación',
+        content:
+            'Empieza con dificultad normal y reduce partículas para jugar con menos sobrecarga visual.',
+        createdAt: DateTime.now().subtract(const Duration(days: 1)),
+      ),
+      CommunityGuideModel(
+        id: _guideIdCounter++,
+        gameId: 10,
+        authorId: 3,
+        authorName: 'Nora',
+        title: 'Rutina corta para Valorant',
+        content:
+            'En Valorant, usa 2 partidas cortas y descansa 5 minutos entre cada una para mantener foco.',
+        createdAt: DateTime.now().subtract(const Duration(hours: 8)),
       ),
     ]);
   }
@@ -844,6 +925,8 @@ class _SyncroRootState extends State<SyncroRoot> {
   }
 
   Widget _buildHomeScreen(UserModel user, List<LibraryGameUi> recentGames) {
+    final List<UserModel> friends = _friendsForUser(user);
+
     return ListView(
       padding: const EdgeInsets.only(top: 12, bottom: 16),
       children: <Widget>[
@@ -897,7 +980,7 @@ class _SyncroRootState extends State<SyncroRoot> {
         ),
         const SizedBox(height: 8),
         SizedBox(
-          height: 290,
+          height: 350,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
             itemCount: recentGames.length,
@@ -909,88 +992,77 @@ class _SyncroRootState extends State<SyncroRoot> {
                 child: Card(
                   child: Padding(
                     padding: const EdgeInsets.all(12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        Container(
-                          height: 82,
-                          decoration: BoxDecoration(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          ClipRRect(
                             borderRadius: BorderRadius.circular(12),
-                            gradient: LinearGradient(
-                              colors: <Color>[
-                                Theme.of(
-                                  context,
-                                ).colorScheme.primary.withValues(alpha: 0.45),
-                                Theme.of(
-                                  context,
-                                ).colorScheme.tertiary.withValues(alpha: 0.45),
-                              ],
+                            child: _buildNetworkImage(
+                              gameUi.game.imageUrl,
+                              width: double.infinity,
+                              height: 120,
                             ),
                           ),
-                          alignment: Alignment.center,
-                          child: Text(
-                            gameUi.game.genre,
+                          const SizedBox(height: 8),
+                          Text(
+                            gameUi.game.name,
                             style: Theme.of(context).textTheme.titleMedium,
                           ),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          gameUi.game.name,
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          '${gameUi.game.genre} - ${_intensityName(gameUi.game.sensoryIntensity).toLowerCase()}',
-                        ),
-                        const SizedBox(height: 6),
-                        Wrap(
-                          spacing: 6,
-                          runSpacing: 6,
-                          children: <Widget>[
-                            if (gameUi.isPlayingNow)
-                              const Chip(label: Text('En guia')),
-                            if (gameUi.isFavorite)
-                              const Chip(label: Text('Favorito')),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: <Widget>[
-                            IconButton(
-                              onPressed: () => _toggleFavorite(gameUi.game.id),
-                              icon: Icon(
-                                gameUi.isFavorite
-                                    ? Icons.favorite
-                                    : Icons.favorite_border,
+                          const SizedBox(height: 4),
+                          Text(
+                            '${gameUi.game.genre} - ${_intensityName(gameUi.game.sensoryIntensity).toLowerCase()}',
+                          ),
+                          const SizedBox(height: 6),
+                          Wrap(
+                            spacing: 6,
+                            runSpacing: 6,
+                            children: <Widget>[
+                              if (gameUi.isPlayingNow)
+                                const Chip(label: Text('En guia')),
+                              if (gameUi.isFavorite)
+                                const Chip(label: Text('Favorito')),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: <Widget>[
+                              IconButton(
+                                onPressed: () => _toggleFavorite(gameUi.game.id),
+                                icon: Icon(
+                                  gameUi.isFavorite
+                                      ? Icons.favorite
+                                      : Icons.favorite_border,
+                                ),
                               ),
-                            ),
-                            IconButton(
-                              tooltip: gameUi.isUpcoming
-                                  ? 'Quitar de Próximos juegos'
-                                  : 'Añadir a Próximos juegos',
-                              onPressed: () => _toggleUpcoming(gameUi.game.id),
-                              icon: Icon(
-                                gameUi.isUpcoming
-                                    ? Icons.playlist_add_check_circle
-                                    : Icons.playlist_add_circle_outlined,
+                              IconButton(
+                                tooltip: gameUi.isUpcoming
+                                    ? 'Quitar de Próximos juegos'
+                                    : 'Añadir a Próximos juegos',
+                                onPressed: () => _toggleUpcoming(gameUi.game.id),
+                                icon: Icon(
+                                  gameUi.isUpcoming
+                                      ? Icons.playlist_add_check_circle
+                                      : Icons.playlist_add_circle_outlined,
+                                ),
                               ),
-                            ),
-                            FilledButton(
-                              onPressed: () => _toggleGuideForGame(
-                                gameUi.game,
-                                focusSearchOnEnable: true,
+                              FilledButton(
+                                onPressed: () => _toggleGuideForGame(
+                                  gameUi.game,
+                                  focusSearchOnEnable: true,
+                                ),
+                                child: Text(
+                                  gameUi.isPlayingNow
+                                      ? 'Quitar guia'
+                                      : 'Ver guia',
+                                ),
                               ),
-                              child: Text(
-                                gameUi.isPlayingNow
-                                    ? 'Quitar guia'
-                                    : 'Ver guia',
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
+                            ],
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -1005,10 +1077,10 @@ class _SyncroRootState extends State<SyncroRoot> {
           height: 120,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
-            itemCount: _friends.length,
+            itemCount: friends.length,
             separatorBuilder: (_, _) => const SizedBox(width: 10),
             itemBuilder: (BuildContext context, int index) {
-              final Map<String, String> friend = _friends[index];
+              final UserModel friend = friends[index];
               return SizedBox(
                 width: 190,
                 child: Card(
@@ -1018,11 +1090,11 @@ class _SyncroRootState extends State<SyncroRoot> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: <Widget>[
                         Text(
-                          '${friend['avatar']} ${friend['name']}',
+                          '${friend.avatar} ${friend.displayName}',
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
                         const SizedBox(height: 6),
-                        Text(friend['status'] ?? ''),
+                        Text(friend.profileStatus),
                       ],
                     ),
                   ),
@@ -1090,13 +1162,16 @@ class _SyncroRootState extends State<SyncroRoot> {
               )
               .take(8)
               .toList();
-    final List<PostModel> guideMatches = normalizedQuery.isEmpty
-        ? <PostModel>[]
-        : _posts
+    final List<CommunityGuideModel> guideMatches = normalizedQuery.isEmpty
+      ? <CommunityGuideModel>[]
+        : _communityGuides
               .where(
-                (PostModel post) =>
-                    post.title.toLowerCase().contains(normalizedQuery) ||
-                    post.content.toLowerCase().contains(normalizedQuery),
+                (CommunityGuideModel guide) =>
+                    _gameNameForId(
+                      guide.gameId,
+                    ).toLowerCase().contains(normalizedQuery) ||
+                    guide.authorName.toLowerCase().contains(normalizedQuery) ||
+                    guide.content.toLowerCase().contains(normalizedQuery),
               )
               .take(8)
               .toList();
@@ -1108,7 +1183,7 @@ class _SyncroRootState extends State<SyncroRoot> {
           decoration: const InputDecoration(
             labelText: 'Buscar juegos, usuarios o guías',
           ),
-          onChanged: (String value) => setState(() => _searchQuery = value),
+          onChanged: _onSearchQueryChanged,
         ),
         const SizedBox(height: 10),
         Wrap(
@@ -1161,60 +1236,162 @@ class _SyncroRootState extends State<SyncroRoot> {
           ),
         if (showGames) const SizedBox(height: 10),
         if (showGames) Text('Catalogo: ${games.length} juegos'),
+        if (showGames && normalizedQuery.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 8),
+          Text(
+            'Resultados IGDB',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 6),
+          if (_isIgdbLoading)
+            const LinearProgressIndicator()
+          else if (_igdbErrorMessage != null)
+            Text(
+              _igdbErrorMessage!,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            )
+          else if (_igdbResults.isEmpty)
+            const Text('Sin resultados IGDB para esta búsqueda.')
+          else
+            ..._igdbResults.take(6).map(
+              (IgdbGameDto item) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        if ((item.coverUrl ?? '').isNotEmpty)
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(10),
+                            child: _buildNetworkImage(
+                              item.coverUrl!,
+                              width: double.infinity,
+                              height: 130,
+                            ),
+                          ),
+                        if ((item.coverUrl ?? '').isNotEmpty)
+                          const SizedBox(height: 8),
+                        Text(
+                          item.name,
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '${item.genre}${item.rating != null ? ' · ${item.rating!.toStringAsFixed(1)}' : ''}',
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          item.summary,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 8),
+                        FilledButton.tonalIcon(
+                          onPressed: () => _addIgdbGameToCatalog(item),
+                          icon: const Icon(Icons.add_circle_outline),
+                          label: const Text('Añadir al catálogo'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
         if (showGames) const SizedBox(height: 8),
         if (showGames)
           ...games.map(
             (LibraryGameUi gameUi) => Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: Card(
-                child: ListTile(
-                  title: Text(gameUi.game.name),
-                  subtitle: Column(
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: _buildNetworkImage(
+                          gameUi.game.imageUrl,
+                          width: double.infinity,
+                          height: 170,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        gameUi.game.name,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(height: 4),
                       Text(
                         '${gameUi.game.genre} - Intensidad ${_intensityName(gameUi.game.sensoryIntensity).toLowerCase()}',
                       ),
-                      Text(gameUi.game.description),
-                      if (gameUi.recommendationTag != null)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 4),
-                          child: Chip(label: Text(gameUi.recommendationTag!)),
-                        ),
-                    ],
-                  ),
-                  trailing: Wrap(
-                    spacing: 4,
-                    children: <Widget>[
-                      IconButton(
-                        onPressed: () => _toggleFavorite(gameUi.game.id),
-                        icon: Icon(
-                          gameUi.isFavorite
-                              ? Icons.favorite
-                              : Icons.favorite_border,
-                        ),
+                      const SizedBox(height: 4),
+                      Text(
+                        gameUi.game.description,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                      IconButton(
-                        tooltip: gameUi.isUpcoming
-                            ? 'Quitar de Próximos juegos'
-                            : 'Añadir a Próximos juegos',
-                        onPressed: () => _toggleUpcoming(gameUi.game.id),
-                        icon: Icon(
-                          gameUi.isUpcoming
-                              ? Icons.playlist_add_check_circle
-                              : Icons.playlist_add_circle_outlined,
-                        ),
+                      const SizedBox(height: 6),
+                      Chip(
+                        label: Text(gameUi.recommendationTag ?? 'Recomendado para todos'),
                       ),
-                      IconButton(
-                        onPressed: () => _toggleGuideForGame(
-                          gameUi.game,
-                          focusSearchOnEnable: true,
-                        ),
-                        icon: Icon(
-                          gameUi.isPlayingNow
-                              ? Icons.bookmark_remove
-                              : Icons.menu_book,
-                        ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: <Widget>[
+                          ActionChip(
+                            avatar: Icon(
+                              gameUi.isFavorite
+                                  ? Icons.favorite
+                                  : Icons.favorite_border,
+                              size: 18,
+                            ),
+                            label: Text(
+                              gameUi.isFavorite
+                                  ? 'Quitar favorito'
+                                  : 'Favorito',
+                            ),
+                            onPressed: () => _toggleFavorite(gameUi.game.id),
+                          ),
+                          ActionChip(
+                            avatar: Icon(
+                              gameUi.isUpcoming
+                                  ? Icons.playlist_add_check_circle
+                                  : Icons.playlist_add_circle_outlined,
+                              size: 18,
+                            ),
+                            label: Text(
+                              gameUi.isUpcoming
+                                  ? 'Quitar próximos'
+                                  : 'Próximos',
+                            ),
+                            onPressed: () => _toggleUpcoming(gameUi.game.id),
+                          ),
+                          ActionChip(
+                            avatar: const Icon(Icons.menu_book_outlined, size: 18),
+                            label: Text(
+                              gameUi.isPlayingNow ? 'Quitar guía' : 'Ver guía',
+                            ),
+                            onPressed: () => _toggleGuideForGame(
+                              gameUi.game,
+                              focusSearchOnEnable: true,
+                            ),
+                          ),
+                          ActionChip(
+                            avatar: const Icon(Icons.edit_note, size: 18),
+                            label: const Text('Añadir guía'),
+                            onPressed: () => _showAddGuideDialog(gameUi.game),
+                          ),
+                          ActionChip(
+                            avatar: const Icon(Icons.groups_2_outlined, size: 18),
+                            label: const Text('Guías comunidad'),
+                            onPressed: _openCommunityGuides,
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -1235,13 +1412,28 @@ class _SyncroRootState extends State<SyncroRoot> {
                 padding: const EdgeInsets.only(bottom: 8),
                 child: Card(
                   child: ListTile(
-                    leading: CircleAvatar(child: Text(match.avatar)),
+                    leading: _buildUserAvatar(match),
                     title: Text(match.displayName),
                     subtitle: Text(match.profileStatus),
-                    trailing: FilledButton.tonal(
-                      onPressed: () =>
-                          setState(() => _activeTab = MainTab.mensajes),
-                      child: const Text('Ver perfil'),
+                    trailing: Wrap(
+                      spacing: 8,
+                      children: <Widget>[
+                        FilledButton.tonal(
+                          onPressed: () => _toggleFriend(match),
+                          child: Text(
+                            _isFriendWithCurrentUser(match)
+                                ? 'Quitar amigo'
+                                : 'Añadir amigo',
+                          ),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: _isFriendWithCurrentUser(match)
+                              ? () => _openDirectMessageWithUser(match)
+                              : null,
+                          icon: const Icon(Icons.chat_bubble_outline),
+                          label: const Text('Chat'),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -1255,20 +1447,20 @@ class _SyncroRootState extends State<SyncroRoot> {
             const Text('Sin guías que coincidan con tu búsqueda.')
           else if (showGuides)
             ...guideMatches.map(
-              (PostModel post) => Padding(
+              (CommunityGuideModel guide) => Padding(
                 padding: const EdgeInsets.only(bottom: 8),
                 child: Card(
                   child: ListTile(
                     leading: const Icon(Icons.menu_book_outlined),
-                    title: Text(post.title),
+                    title: Text(guide.title),
                     subtitle: Text(
-                      post.content,
+                      '${_gameNameForId(guide.gameId)} · ${guide.authorName}: ${guide.content}',
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                     ),
                     trailing: FilledButton.tonal(
-                      onPressed: _openCommunityGuides,
-                      child: const Text('Abrir'),
+                      onPressed: () => _openCommunityGuideDetail(guide),
+                      child: const Text('Ver'),
                     ),
                   ),
                 ),
@@ -1279,7 +1471,126 @@ class _SyncroRootState extends State<SyncroRoot> {
     );
   }
 
+  void _onSearchQueryChanged(String value) {
+    setState(() {
+      _searchQuery = value;
+    });
+    _queueIgdbSearch(value);
+  }
+
+  void _queueIgdbSearch(String rawQuery) {
+    final String query = rawQuery.trim();
+    final bool shouldSearch =
+        _searchScope == SearchScope.todo || _searchScope == SearchScope.juegos;
+
+    _igdbSearchDebounce?.cancel();
+
+    if (!shouldSearch || query.length < 2) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _lastIgdbQuery = query;
+        _isIgdbLoading = false;
+        _igdbErrorMessage = null;
+        _igdbResults.clear();
+      });
+      return;
+    }
+
+    _igdbSearchDebounce = Timer(const Duration(milliseconds: 450), () {
+      unawaited(_searchGamesFromIgdb(query));
+    });
+  }
+
+  Future<void> _searchGamesFromIgdb(String query) async {
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _isIgdbLoading = true;
+      _igdbErrorMessage = null;
+      _lastIgdbQuery = query;
+    });
+
+    try {
+      final List<IgdbGameDto> results = await IgdbService.searchGames(
+        query: query,
+        limit: 12,
+      );
+      if (!mounted || _lastIgdbQuery != query) {
+        return;
+      }
+      setState(() {
+        _igdbResults
+          ..clear()
+          ..addAll(results);
+        _isIgdbLoading = false;
+      });
+    } on TimeoutException {
+      if (!mounted || _lastIgdbQuery != query) {
+        return;
+      }
+      setState(() {
+        _igdbResults.clear();
+        _isIgdbLoading = false;
+        _igdbErrorMessage =
+            'IGDB tardó demasiado en responder. Comprueba que el backend esté encendido.';
+      });
+    } catch (error) {
+      if (!mounted || _lastIgdbQuery != query) {
+        return;
+      }
+      setState(() {
+        _igdbResults.clear();
+        _isIgdbLoading = false;
+        _igdbErrorMessage =
+            'IGDB no disponible ahora mismo. Puedes seguir usando el catálogo local.';
+      });
+    }
+  }
+
+  void _addIgdbGameToCatalog(IgdbGameDto item) {
+    final String normalized = item.name.trim().toLowerCase();
+    if (_games.any((GameModel game) => game.name.trim().toLowerCase() == normalized)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${item.name} ya existe en tu catálogo.')),
+      );
+      return;
+    }
+
+    final SensoryIntensity inferredIntensity = (item.rating ?? 60) >= 75
+        ? SensoryIntensity.media
+        : SensoryIntensity.baja;
+    final String imageUrl = (item.coverUrl ?? '').trim().isNotEmpty
+        ? item.coverUrl!.trim()
+        : _imageForGameName(item.name);
+
+    setState(() {
+      _games.insert(
+        0,
+        GameModel(
+          id: _nextGameId(),
+          name: item.name.trim(),
+          genre: item.genre.trim().isEmpty ? 'General' : item.genre.trim(),
+          imageUrl: imageUrl,
+          sensoryIntensity: inferredIntensity,
+          description: item.summary.trim().isEmpty
+              ? 'Importado desde IGDB.'
+              : item.summary.trim(),
+        ),
+      );
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('${item.name} añadido al catálogo.')),
+    );
+  }
+
   Widget _buildOptionsScreen(UserModel user) {
+    final List<UserModel> friends = _friendsForUser(user);
+    final int friendCount = friends.length;
     final List<LibraryGameUi> games = _buildLibraryGames(
       user,
       applyFilters: false,
@@ -1321,6 +1632,24 @@ class _SyncroRootState extends State<SyncroRoot> {
           ),
         ),
         const SizedBox(height: 10),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: _changeCurrentUserPhotoFromGallery,
+            icon: const Icon(Icons.photo_library_outlined),
+            label: const Text('Cambiar foto desde galeria'),
+          ),
+        ),
+        const SizedBox(height: 8),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: _removeCurrentUserPhoto,
+            icon: const Icon(Icons.hide_image_outlined),
+            label: const Text('Quitar foto'),
+          ),
+        ),
+        const SizedBox(height: 10),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(12),
@@ -1333,21 +1662,28 @@ class _SyncroRootState extends State<SyncroRoot> {
                   height: 72,
                   child: ListView.separated(
                     scrollDirection: Axis.horizontal,
-                    itemCount: _friends.length,
+                    itemCount: friends.length,
                     separatorBuilder: (_, _) => const SizedBox(width: 8),
                     itemBuilder: (BuildContext context, int index) {
-                      final Map<String, String> friend = _friends[index];
+                      final UserModel friend = friends[index];
                       return Chip(
-                        avatar: CircleAvatar(
-                          child: Text(friend['avatar'] ?? '🙂'),
-                        ),
-                        label: Text('${friend['name']} · ${friend['status']}'),
+                        avatar: _buildUserAvatar(friend),
+                        label: Text('${friend.displayName} · ${friend.profileStatus}'),
                       );
                     },
                   ),
                 ),
               ],
             ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: () => _showFriendsBottomSheet(user),
+            icon: const Icon(Icons.group_outlined),
+            label: Text('Ver mis amigos ($friendCount)'),
           ),
         ),
         const SizedBox(height: 10),
@@ -1416,8 +1752,17 @@ class _SyncroRootState extends State<SyncroRoot> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: <Widget>[
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(10),
+                                child: _buildNetworkImage(
+                                  gameUi.game.imageUrl,
+                                  width: double.infinity,
+                                  height: 72,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
                               Container(
-                                height: 72,
+                                height: 38,
                                 width: double.infinity,
                                 decoration: BoxDecoration(
                                   borderRadius: BorderRadius.circular(10),
@@ -1436,7 +1781,6 @@ class _SyncroRootState extends State<SyncroRoot> {
                                   style: Theme.of(context).textTheme.titleSmall,
                                 ),
                               ),
-                              const SizedBox(height: 8),
                               Text(
                                 gameUi.game.name,
                                 maxLines: 2,
@@ -1627,6 +1971,7 @@ class _SyncroRootState extends State<SyncroRoot> {
     final String newName = nameController.text.trim();
     final String newStatus = statusController.text.trim();
     final String newAvatar = avatarController.text.trim();
+    final bool clearAvatarBytes = user.avatarBytes != null && selectedBytes == null;
 
     _updateCurrentUser(
       (UserModel base) => base.copyWith(
@@ -1634,6 +1979,7 @@ class _SyncroRootState extends State<SyncroRoot> {
         profileStatus: newStatus.isEmpty ? 'Sin estado' : newStatus,
         avatar: newAvatar.isEmpty ? selectedAvatar : newAvatar,
         avatarBytes: selectedBytes,
+        clearAvatarBytes: clearAvatarBytes,
       ),
     );
   }
@@ -1649,6 +1995,104 @@ class _SyncroRootState extends State<SyncroRoot> {
       return null;
     }
     return file.readAsBytes();
+  }
+  Future<void> _changeCurrentUserPhotoFromGallery() async {
+    final Uint8List? bytes = await _pickProfileImageFromGallery();
+    if (bytes == null || !mounted) {
+      return;
+    }
+
+    _updateCurrentUser(
+      (UserModel base) => base.copyWith(
+        avatarBytes: bytes,
+      ),
+    );
+
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Foto de perfil actualizada.')),
+    );
+  }
+
+  void _removeCurrentUserPhoto() {
+    final UserModel? current = _currentUser;
+    if (current == null || current.avatarBytes == null) {
+      return;
+    }
+
+    final String fallbackAvatar = current.avatar.trim().isEmpty
+        ? '🎮'
+        : current.avatar.trim();
+    _updateCurrentUser(
+      (UserModel base) => base.copyWith(
+        avatar: fallbackAvatar,
+        clearAvatarBytes: true,
+      ),
+    );
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Volviste al avatar emoji.')),
+    );
+  }
+
+  void _showFriendsBottomSheet(UserModel user) {
+    final List<UserModel> friends = _friendsForUser(user);
+
+    showModalBottomSheet<void>(
+      context: context,
+      useRootNavigator: false,
+      showDragHandle: true,
+      builder: (BuildContext sheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  'Mis amigos',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 10),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 340),
+                  child: friends.isEmpty
+                      ? const Center(
+                          child: Text(
+                            'Aún no tienes amigos. Búscalos en la pestaña Buscar.',
+                          ),
+                        )
+                      : ListView.separated(
+                          shrinkWrap: true,
+                          itemCount: friends.length,
+                          separatorBuilder: (_, _) => const Divider(height: 1),
+                          itemBuilder: (BuildContext context, int index) {
+                            final UserModel friend = friends[index];
+                            return ListTile(
+                              leading: _buildUserAvatar(friend),
+                              title: Text(friend.displayName),
+                              subtitle: Text(friend.profileStatus),
+                              trailing: IconButton(
+                                tooltip: 'Abrir chat',
+                                onPressed: () {
+                                  Navigator.of(sheetContext).pop();
+                                  _openDirectMessageWithUser(friend);
+                                },
+                                icon: const Icon(Icons.chat_bubble_outline),
+                              ),
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   Widget _buildUserAvatar(UserModel user, {double radius = 18}) {
@@ -2065,13 +2509,372 @@ class _SyncroRootState extends State<SyncroRoot> {
   }
 
   void _openCommunityGuides() {
+    final List<CommunityGuideModel> guides = <CommunityGuideModel>[
+      ..._communityGuides,
+    ]..sort((CommunityGuideModel a, CommunityGuideModel b) {
+        return b.createdAt.compareTo(a.createdAt);
+      });
+
+    showModalBottomSheet<void>(
+      context: context,
+      useRootNavigator: false,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (BuildContext sheetContext) {
+        return SafeArea(
+          child: SizedBox(
+            height: MediaQuery.of(sheetContext).size.height * 0.78,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    'Guías de la comunidad',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Todas las guías publicadas por usuarios (${guides.length})',
+                  ),
+                  const SizedBox(height: 10),
+                  Expanded(
+                    child: guides.isEmpty
+                        ? const Center(
+                            child: Text('Aún no hay guías publicadas.'),
+                          )
+                        : ListView.separated(
+                            itemCount: guides.length,
+                            separatorBuilder: (_, _) => const SizedBox(height: 8),
+                            itemBuilder: (BuildContext context, int index) {
+                              final CommunityGuideModel guide = guides[index];
+                              return Card(
+                                child: Padding(
+                                  padding: const EdgeInsets.all(12),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: <Widget>[
+                                      Text(
+                                        guide.title,
+                                        style: Theme.of(context).textTheme.titleMedium,
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        _gameNameForId(guide.gameId),
+                                        style: Theme.of(context).textTheme.bodySmall,
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        'Por ${guide.authorName} · ${_formatGuideDate(guide.createdAt)}',
+                                        style: Theme.of(context).textTheme.bodySmall,
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        guide.content,
+                                        maxLines: 3,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Align(
+                                        alignment: Alignment.centerRight,
+                                        child: FilledButton.tonal(
+                                          onPressed: () =>
+                                              _openCommunityGuideDetail(guide),
+                                          child: const Text('Ver completa'),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _showAddGuideDialog(GameModel game) async {
+    final UserModel? user = _currentUser;
+    if (user == null) {
+      return;
+    }
+
+    final TextEditingController titleController = TextEditingController();
+    final TextEditingController contentController = TextEditingController();
+    final bool? save = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Añadir guía · ${game.name}'),
+          content: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                TextField(
+                  controller: titleController,
+                  maxLines: 1,
+                  decoration: const InputDecoration(
+                    labelText: 'Título de la guía',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: contentController,
+                  maxLines: 6,
+                  decoration: const InputDecoration(
+                    hintText: 'Escribe aquí tu guía para ayudar a otros jugadores...',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Publicar guía'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (save != true) {
+      return;
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    final String title = titleController.text.trim();
+    final String content = contentController.text.trim();
+    if (title.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Añade un título a la guía.')),
+      );
+      return;
+    }
+    if (content.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('La guía no puede estar vacía.')),
+      );
+      return;
+    }
+
     setState(() {
-      _activeTab = MainTab.mensajes;
+      _communityGuides.insert(
+        0,
+        CommunityGuideModel(
+          id: _guideIdCounter++,
+          gameId: game.id,
+          authorId: user.id,
+          authorName: user.displayName,
+          title: title,
+          content: content,
+          createdAt: DateTime.now(),
+        ),
+      );
+      _playingByUser.putIfAbsent(user.id, () => <int, bool>{})[game.id] = true;
     });
+
+    _completeMissionForCurrentUser(DailyMissionType.readGuide);
+    if (!mounted) {
+      return;
+    }
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text(
-          'Zona de guías abierta: publica y comenta para la comunidad.',
+      const SnackBar(content: Text('Guía publicada en comunidad.')),
+    );
+  }
+
+  Future<void> _openCommunityGuideDetail(CommunityGuideModel guide) async {
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text(guide.title),
+          content: SizedBox(
+            width: 460,
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    _gameNameForId(guide.gameId),
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Por ${guide.authorName} · ${_formatGuideDate(guide.createdAt)}',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 12),
+                  Text(guide.content),
+                ],
+              ),
+            ),
+          ),
+          actions: <Widget>[
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cerrar'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildNetworkImage(
+    String imageUrl, {
+    required double width,
+    required double height,
+  }) {
+    return Image.network(
+      imageUrl,
+      width: width,
+      height: height,
+      fit: BoxFit.cover,
+      errorBuilder: (_, _, _) => Container(
+        width: width,
+        height: height,
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        alignment: Alignment.center,
+        child: const Icon(Icons.videogame_asset_outlined),
+      ),
+      loadingBuilder: (_, Widget child, ImageChunkEvent? loadingProgress) {
+        if (loadingProgress == null) {
+          return child;
+        }
+        return Container(
+          width: width,
+          height: height,
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          alignment: Alignment.center,
+          child: const SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        );
+      },
+    );
+  }
+
+  String _streamUserIdFromUser(UserModel user) => 'user_${user.id}';
+
+  String _gameNameForId(int gameId) {
+    final GameModel? game = _games.cast<GameModel?>().firstWhere(
+      (GameModel? game) => game != null && game.id == gameId,
+      orElse: () => null,
+    );
+    return game?.name ?? 'Juego $gameId';
+  }
+
+  String _formatGuideDate(DateTime date) {
+    final String day = date.day.toString().padLeft(2, '0');
+    final String month = date.month.toString().padLeft(2, '0');
+    final String year = date.year.toString();
+    final String hour = date.hour.toString().padLeft(2, '0');
+    final String minute = date.minute.toString().padLeft(2, '0');
+    return '$day/$month/$year · $hour:$minute';
+  }
+
+  String _imageForGameName(String gameName) {
+    const Map<String, String> coversByName = <String, String>{
+      'Minecraft':
+        'https://images.igdb.com/igdb/image/upload/t_cover_big/co8fu7.jpg',
+      'Stardew Valley':
+        'https://images.igdb.com/igdb/image/upload/t_cover_big/co5n7e.jpg',
+      'The Legend of Zelda':
+        'https://images.igdb.com/igdb/image/upload/t_cover_big/co3p2d.jpg',
+      'Celeste':
+        'https://images.igdb.com/igdb/image/upload/t_cover_big/co3p8d.jpg',
+      'Hollow Knight':
+        'https://images.igdb.com/igdb/image/upload/t_cover_big/co1rgi.jpg',
+      'Terraria':
+        'https://images.igdb.com/igdb/image/upload/t_cover_big/co14pf.jpg',
+      'Hades':
+        'https://images.igdb.com/igdb/image/upload/t_cover_big/co2eeu.jpg',
+      'Animal Crossing':
+        'https://images.igdb.com/igdb/image/upload/t_cover_big/co2ed3.jpg',
+      'Rocket League':
+        'https://images.igdb.com/igdb/image/upload/t_cover_big/co5w4m.jpg',
+      'Valorant':
+        'https://images.igdb.com/igdb/image/upload/t_cover_big/co2h6f.jpg',
+      'League of Legends':
+        'https://images.igdb.com/igdb/image/upload/t_cover_big/co49wj.jpg',
+      'Fortnite':
+        'https://images.igdb.com/igdb/image/upload/t_cover_big/co1uaf.jpg',
+    };
+
+    final String? cover = coversByName[gameName];
+    if (cover != null) {
+      return cover;
+    }
+
+    final String encodedName = Uri.encodeComponent(gameName);
+    return 'https://placehold.co/1024x576/0f172a/e2e8f0.png?text=$encodedName';
+  }
+
+  List<UserModel> _friendsForUser(UserModel user) {
+    final Set<int> ids = _friendsByUser[user.id] ?? <int>{};
+    return _users.where((UserModel item) => ids.contains(item.id)).toList();
+  }
+
+  bool _isFriendWithCurrentUser(UserModel other) {
+    final UserModel? user = _currentUser;
+    if (user == null || user.id == other.id) {
+      return false;
+    }
+    final Set<int> ids = _friendsByUser[user.id] ?? <int>{};
+    return ids.contains(other.id);
+  }
+
+  void _toggleFriend(UserModel other) {
+    final UserModel? user = _currentUser;
+    if (user == null || user.id == other.id) {
+      return;
+    }
+
+    setState(() {
+      final Set<int> mine = _friendsByUser.putIfAbsent(user.id, () => <int>{});
+      final Set<int> theirs = _friendsByUser.putIfAbsent(other.id, () => <int>{});
+      if (mine.contains(other.id)) {
+        mine.remove(other.id);
+        theirs.remove(user.id);
+      } else {
+        mine.add(other.id);
+        theirs.add(user.id);
+      }
+    });
+  }
+
+  void _openDirectMessageWithUser(UserModel peer) {
+    final UserModel? user = _currentUser;
+    if (user == null) {
+      return;
+    }
+
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => StreamHubScreen(
+          displayName: user.displayName,
+          currentUserId: _streamUserIdFromUser(user),
+          initialPeerId: _streamUserIdFromUser(peer),
+          initialPeerName: peer.displayName,
         ),
       ),
     );
@@ -2173,6 +2976,7 @@ class _SyncroRootState extends State<SyncroRoot> {
             ),
           ),
         ),
+        const SizedBox(height: 10),
         const SizedBox(height: 10),
         Card(
           child: Padding(
@@ -2294,6 +3098,8 @@ class _SyncroRootState extends State<SyncroRoot> {
   }
 
   Widget _buildSocialScreen(UserModel user, List<String> favoriteGames) {
+    final List<UserModel> friends = _friendsForUser(user);
+
     return ListView(
       padding: const EdgeInsets.only(top: 12, bottom: 16),
       children: <Widget>[
@@ -2310,6 +3116,7 @@ class _SyncroRootState extends State<SyncroRoot> {
                 const SizedBox(height: 6),
                 Text('Avatar: ${user.avatar}'),
                 Text('Nombre: ${user.displayName}'),
+                Text('Amigos: ${friends.length}'),
                 Text(
                   'Juegos favoritos: ${favoriteGames.isEmpty ? 'Sin favoritos aun' : favoriteGames.join(', ')}',
                 ),
@@ -2317,6 +3124,7 @@ class _SyncroRootState extends State<SyncroRoot> {
             ),
           ),
         ),
+        const SizedBox(height: 10),
         const SizedBox(height: 10),
         Card(
           child: Padding(
@@ -2335,12 +3143,35 @@ class _SyncroRootState extends State<SyncroRoot> {
           ),
         ),
         const SizedBox(height: 10),
+        const SizedBox(height: 10),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(12),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
+                Text(
+                  'Accesos rápidos',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: <Widget>[
+                    FilledButton.icon(
+                      onPressed: () => _showFriendsBottomSheet(user),
+                      icon: const Icon(Icons.group_outlined),
+                      label: const Text('Ver amigos'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: () => setState(() => _activeTab = MainTab.buscar),
+                      icon: const Icon(Icons.person_search),
+                      label: const Text('Buscar amigos'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
                 Text(
                   'Stream API',
                   style: Theme.of(context).textTheme.titleMedium,
@@ -2355,7 +3186,10 @@ class _SyncroRootState extends State<SyncroRoot> {
                     Navigator.of(context).push(
                       MaterialPageRoute<void>(
                         builder: (_) =>
-                            StreamHubScreen(displayName: user.displayName),
+                            StreamHubScreen(
+                              displayName: user.displayName,
+                              currentUserId: _streamUserIdFromUser(user),
+                            ),
                       ),
                     );
                   },
@@ -2453,15 +3287,10 @@ class _SyncroRootState extends State<SyncroRoot> {
           return queryMatch && intensityMatch;
         })
         .map((GameModel game) {
-          final String? recommendationTag = switch (user.accessibilityMode) {
-            AccessibilityMode.tea =>
-              game.sensoryIntensity == SensoryIntensity.baja
-                  ? 'Recomendado TEA'
-                  : null,
-            AccessibilityMode.tdah =>
-              game.sensoryIntensity != SensoryIntensity.baja
-                  ? 'Recomendado TDAH'
-                  : null,
+          final String recommendationTag = switch (game.sensoryIntensity) {
+            SensoryIntensity.baja => 'Recomendado para TEA',
+            SensoryIntensity.media => 'Recomendado para TEA y TDAH',
+            SensoryIntensity.alta => 'Recomendado para TDAH',
           };
           return LibraryGameUi(
             game: game,
@@ -2552,7 +3381,7 @@ class _SyncroRootState extends State<SyncroRoot> {
         }
 
         final UserModel user = UserModel(
-          id: _users.length + 1,
+          id: _nextUserId(),
           email: email,
           password: password,
           displayName: displayName.isEmpty
@@ -2683,6 +3512,10 @@ class _SyncroRootState extends State<SyncroRoot> {
       _ownedCosmeticsByUser.remove(userId);
       _focusSecondsByUser.remove(userId);
       _breakSecondsByUser.remove(userId);
+      _friendsByUser.remove(userId);
+      for (final Set<int> ids in _friendsByUser.values) {
+        ids.remove(userId);
+      }
       _currentUser = null;
       _activeTab = MainTab.home;
       _searchQuery = '';
@@ -3014,6 +3847,7 @@ class _SyncroRootState extends State<SyncroRoot> {
     _upcomingByUser.putIfAbsent(userId, () => <int, bool>{});
     _focusSecondsByUser.putIfAbsent(userId, () => 0);
     _breakSecondsByUser.putIfAbsent(userId, () => 0);
+    _friendsByUser.putIfAbsent(userId, () => <int>{});
   }
 
   List<TaskModel> _buildDailyMissions() {
@@ -3118,7 +3952,7 @@ class _SyncroRootState extends State<SyncroRoot> {
     }
 
     return UserModel(
-      id: (data['id'] as int?) ?? (_users.length + 1),
+      id: (data['id'] as int?) ?? _nextUserId(),
       email: (data['email'] as String?) ?? email,
       password: storedPassword,
       displayName: (data['displayName'] as String?) ?? email.split('@').first,
@@ -3192,6 +4026,26 @@ class _SyncroRootState extends State<SyncroRoot> {
       AccessibilityMode.tdah =>
         'TDAH: tema más dinámico, avisos completos y ritmo visual más activo.',
     };
+  }
+
+  int _nextUserId() {
+    if (_users.isEmpty) {
+      return 1;
+    }
+    return _users
+            .map((UserModel user) => user.id)
+            .reduce((int a, int b) => a > b ? a : b) +
+        1;
+  }
+
+  int _nextGameId() {
+    if (_games.isEmpty) {
+      return 1;
+    }
+    return _games
+            .map((GameModel game) => game.id)
+            .reduce((int a, int b) => a > b ? a : b) +
+        1;
   }
 
   void _startPausePomodoro() {

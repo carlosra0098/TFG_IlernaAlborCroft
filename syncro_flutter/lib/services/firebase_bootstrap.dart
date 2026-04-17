@@ -7,21 +7,36 @@ class FirebaseBootstrap {
   static bool _isReady = false;
   static String? _lastError;
 
-  static bool get isReady => _isReady;
+  static bool get isReady => _isReady || Firebase.apps.isNotEmpty;
   static String? get lastError => _lastError;
 
   static Future<void> initializeAndSeed() async {
     try {
       if (Firebase.apps.isEmpty) {
-        await Firebase.initializeApp(
-          options: DefaultFirebaseOptions.currentPlatform,
-        );
+        try {
+          await Firebase.initializeApp(
+            options: DefaultFirebaseOptions.currentPlatform,
+          );
+        } catch (error) {
+          final String message = error.toString();
+          if (!message.contains('duplicate-app')) {
+            rethrow;
+          }
+        }
       }
-      await _seedDatabaseIfNeeded();
+
       _isReady = true;
       _lastError = null;
+
+      try {
+        await _seedDatabaseIfNeeded();
+      } catch (seedError, seedStack) {
+        _lastError = 'Seed warning: $seedError';
+        debugPrint('Firebase seed warning: $seedError');
+        debugPrint('$seedStack');
+      }
     } catch (error, stackTrace) {
-      _isReady = false;
+      _isReady = Firebase.apps.isNotEmpty;
       _lastError = error.toString();
       debugPrint('Firebase init skipped: $error');
       debugPrint('$stackTrace');
@@ -71,7 +86,6 @@ class FirebaseBootstrap {
       'Rocket League',
       'Valorant',
       'League of Legends',
-      'Fortnite',
     ];
 
     final List<String> genres = <String>[
@@ -83,7 +97,7 @@ class FirebaseBootstrap {
       'Simulacion',
     ];
 
-    for (int id = 1; id <= 40; id++) {
+    for (int id = 1; id <= featured.length; id++) {
       final String intensity = switch (id % 3) {
         0 => 'baja',
         1 => 'media',
@@ -94,7 +108,7 @@ class FirebaseBootstrap {
         firestore.collection('games').doc(id.toString()),
         <String, dynamic>{
           'id': id,
-          'name': id <= featured.length ? featured[id - 1] : 'Juego $id',
+          'name': featured[id - 1],
           'genre': genres[id % genres.length],
           'sensoryIntensity': intensity,
           'description':

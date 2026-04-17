@@ -38,6 +38,7 @@ dependencies:
   shared_preferences: ^2.4.0
   firebase_core: ^4.6.0
   cloud_firestore: ^6.2.0
+  firebase_storage: ^13.0.0
   firebase_auth: ^6.3.0
   http: ^1.2.2
   stream_chat: ^9.23.0
