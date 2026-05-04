@@ -34,8 +34,28 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+        
+    // Note: customizing `applicationVariants` in Kotlin DSL can be fragile.
+    // We'll create a simple task that renames the built APK to `Syncro.apk`.
 }
+
+
 
 flutter {
     source = "../.."
+}
+
+// Task: copy & rename the generated Flutter APK to Syncro.apk
+tasks.register<org.gradle.api.tasks.Copy>("renameSyncroApk") {
+    val src = file("$buildDir/outputs/flutter-apk/app-release.apk")
+    from(src)
+    into(file("$buildDir/outputs/flutter-apk"))
+    rename { _ -> "Syncro.apk" }
+}
+
+// Hook the rename to run after assembleRelease if/when that task exists
+gradle.projectsEvaluated {
+    tasks.matching { it.name == "assembleRelease" }.all {
+        finalizedBy("renameSyncroApk")
+    }
 }
